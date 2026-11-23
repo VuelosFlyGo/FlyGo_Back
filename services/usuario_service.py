@@ -5,12 +5,10 @@ from utils.seguridad import Seguridad
 class UsuarioService:
 
     def registrar_usuario(self, datos):
-        print(datos)
         conexion = Database.obtener_conexion()
         cursor = conexion.cursor()
 
         try:
-            print("hash")
             password_hash = Seguridad.generar_hash(datos["password"])
 
             cursor.execute("""
@@ -27,12 +25,10 @@ class UsuarioService:
             ))
 
             usuario_id = cursor.fetchone()[0]
-            print(usuario_id)
             conexion.commit()
             return usuario_id
 
         except Exception as e:
-            print(e)
             conexion.rollback()
             raise e
 

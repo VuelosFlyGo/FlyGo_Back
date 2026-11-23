@@ -9,14 +9,6 @@ class Database:
     @staticmethod
     def obtener_conexion():
         try:
-            print("==== DATOS DE CONEXIÓN ====")
-            print("DB_HOST:", os.getenv("DB_HOST"))
-            print("DB_NAME:", os.getenv("DB_NAME", "postgres"))
-            print("DB_USER:", os.getenv("DB_USER", "postgres"))
-            print("DB_PORT:", os.getenv("DB_PORT", "5432"))
-            print("DB_PASSWORD existe:", os.getenv("DB_PASSWORD") is not None)
-            print("===========================")
-
             conexion = psycopg2.connect(
                 host=os.getenv("DB_HOST"),
                 database=os.getenv("DB_NAME", "postgres"),
@@ -27,10 +19,7 @@ class Database:
                 connect_timeout=10
             )
 
-            print("Conexión a Supabase exitosa")
             return conexion
 
-        except Exception as e:
-            print("ERROR AL CONECTAR CON SUPABASE:")
-            print(repr(e))
-            raise e
+        except Exception:
+            raise

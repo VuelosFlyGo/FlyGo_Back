@@ -10,6 +10,7 @@ class ReservaService:
         cursor = conexion.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
         try:
+            cursor.execute("SET LOCAL lock_timeout = '5s'")
             cursor.execute("""
                 SELECT reserva_id, codigo_reserva, total, estado
                 FROM crear_reserva_segura(%s, %s, %s)
@@ -51,12 +52,14 @@ class ReservaService:
                     r.total,
                     r.estado,
                     r.fecha_reserva,
+                    r.modificada,
                     v.aerolinea,
                     v.origen,
                     v.destino,
                     v.fecha,
                     v.hora_salida,
                     v.hora_llegada,
+                    v.precio AS precio_actual,
                     COALESCE(
                         ARRAY_AGG(av.numero_asiento ORDER BY av.numero_asiento)
                         FILTER (WHERE av.numero_asiento IS NOT NULL),
@@ -74,12 +77,14 @@ class ReservaService:
                     r.total,
                     r.estado,
                     r.fecha_reserva,
+                    r.modificada,
                     v.aerolinea,
                     v.origen,
                     v.destino,
                     v.fecha,
                     v.hora_salida,
-                    v.hora_llegada
+                    v.hora_llegada,
+                    v.precio
                 ORDER BY r.fecha_reserva DESC
             """, (usuario_id,))
 
@@ -94,12 +99,14 @@ class ReservaService:
                     "total": float(fila["total"]),
                     "estado": fila["estado"],
                     "fecha_reserva": str(fila["fecha_reserva"]),
+                    "modificada": bool(fila["modificada"]),
                     "aerolinea": fila["aerolinea"],
                     "origen": fila["origen"],
                     "destino": fila["destino"],
                     "fecha_vuelo": str(fila["fecha"]),
                     "hora_salida": str(fila["hora_salida"]),
                     "hora_llegada": str(fila["hora_llegada"]),
+                    "precio_actual": float(fila["precio_actual"]),
                     "asientos": list(fila["asientos"])
                 })
 
@@ -114,6 +121,7 @@ class ReservaService:
         cursor = conexion.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
         try:
+            cursor.execute("SET LOCAL lock_timeout = '5s'")
             cursor.execute("""
                 SELECT vuelo_id, cantidad_asientos, estado
                 FROM reservas
@@ -134,6 +142,15 @@ class ReservaService:
             if reserva["estado"] != "ACTIVA":
                 conexion.rollback()
                 return "NO_ACTIVA"
+
+            # Orden global: reserva -> vuelo -> asientos.
+            # Así una cancelación nunca invierte los bloqueos de una reserva.
+            cursor.execute("""
+                SELECT id
+                FROM vuelos
+                WHERE id = %s
+                FOR UPDATE
+            """, (reserva["vuelo_id"],))
 
             cursor.execute("""
                 UPDATE reservas

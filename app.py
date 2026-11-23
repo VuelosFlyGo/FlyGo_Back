@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 
 from services.usuario_service import UsuarioService
@@ -7,6 +7,7 @@ from services.vuelo_service import VueloService
 from services.reserva_service import ReservaService
 from services.asiento_service import AsientoService
 from services.admin_vuelo_service import AdminVueloService
+from services.boleto_pdf_service import BoletoPdfService
 
 app = Flask(__name__)
 CORS(app)
@@ -17,12 +18,46 @@ vuelo_service = VueloService()
 reserva_service = ReservaService()
 asiento_service = AsientoService()
 admin_vuelo_service = AdminVueloService()
+boleto_pdf_service = BoletoPdfService()
+
+
+def respuesta_error_reserva(error, mensaje):
+    """Distingue una petición inválida de un conflicto transaccional."""
+    codigo_postgres = getattr(error, "pgcode", None)
+    detalle = str(error)
+    conflicto = codigo_postgres in {"40001", "40P01", "55P03", "23505"} or any(
+        texto in detalle.lower()
+        for texto in (
+            "ya no est",
+            "concurrencia",
+            "otra reserva",
+            "asientos suficientes disponibles",
+            "ya fue modificada",
+            "no admite nuevos cambios",
+            "lock timeout",
+            "deadlock",
+        )
+    )
+    reserva_desactualizada = any(
+        texto in detalle.lower()
+        for texto in ("ya fue modificada", "no admite nuevos cambios")
+    )
+    return jsonify({
+        "error": "Conflicto de concurrencia" if conflicto else mensaje,
+        "detalle": (
+            "Esta reserva ya fue modificada y confirmada en otra pestaña."
+            if reserva_desactualizada
+            else (
+                "Otro cliente modificó la disponibilidad al mismo tiempo. "
+                "Actualice los asientos y vuelva a intentarlo."
+                if conflicto else detalle
+            )
+        ),
+    }), 409 if conflicto else 400
 
 def obtener_usuario_desde_token():
     try:
         auth_header = request.headers.get("Authorization")
-
-        print("obtener")
 
         if not auth_header:
             return None, jsonify({"error": "Token no enviado"}), 401
@@ -35,16 +70,14 @@ def obtener_usuario_desde_token():
 
         if usuario is None:
             return None, jsonify({"error": "Token inválido o expirado"}), 401
-        print("sasdasdsad")
         return usuario, None, None
     except Exception as e:
-        print("Error al validar token:", repr(e))
         return None, jsonify({"error": "Error al validar token", "detalle": str(e)}), 500   
 
 @app.route("/")
 def inicio():
     return jsonify({
-        "mensaje": "API AeroTech Reservas funcionando",
+        "mensaje": "API FlyGo Reservas funcionando",
         "arquitectura": "Flutter + Flask + Render + Supabase"
     })
 
@@ -70,9 +103,16 @@ def registro():
         }), 201
 
     except Exception as e:
+        if getattr(e, "pgcode", None) == "23505":
+            restriccion = getattr(getattr(e, "diag", None), "constraint_name", "") or ""
+            campo = "correo" if "correo" in restriccion else "nombre de usuario"
+            return jsonify({
+                "error": f"Ese {campo} ya está registrado",
+                "campo": campo,
+            }), 409
         return jsonify({
             "error": "No se pudo registrar el usuario",
-            "detalle": str(e)
+            "detalle": "Revise los datos e inténtelo nuevamente"
         }), 500
 
 
@@ -112,7 +152,8 @@ def logout():
 
     token = auth_header.replace("Bearer ", "")
     try:
-        auth_service.logout(token)
+        if not auth_service.logout(token):
+            return jsonify({"error": "Token inválido"}), 401
         return jsonify({"mensaje": "Sesión cerrada correctamente"}), 200
     except Exception as e:
         return jsonify({
@@ -123,9 +164,7 @@ def logout():
 
 @app.route("/api/vuelos", methods=["GET"])
 def vuelos():
-    print("vuelos????????????????????????????????????????????????????????????????????")
     usuario, error, codigo = obtener_usuario_desde_token()
-    print(error, codigo)
 
     if error:
         return error, codigo
@@ -142,7 +181,13 @@ def vuelos():
         fecha_fin = fecha
 
     try:
-        vuelos_disponibles = vuelo_service.buscar_vuelos(origen, destino, fecha_inicio, fecha_fin)
+        vuelos_disponibles = vuelo_service.buscar_vuelos(
+            origen,
+            destino,
+            fecha_inicio,
+            fecha_fin,
+            incluir_agotados=usuario.get("rol") == "admin",
+        )
         return jsonify(vuelos_disponibles), 200
 
     except Exception as e:
@@ -183,10 +228,7 @@ def reservar():
         }), 201
 
     except Exception as e:
-        return jsonify({
-            "error": "No se pudo registrar la reserva",
-            "detalle": str(e)
-        }), 400
+        return respuesta_error_reserva(e, "No se pudo registrar la reserva")
 
 
 @app.route("/api/reservas/mis-reservas", methods=["GET"])
@@ -226,10 +268,7 @@ def cancelar(reserva_id):
         return jsonify({"mensaje": "Reserva cancelada correctamente"}), 200
 
     except Exception as e:
-        return jsonify({
-            "error": "No se pudo cancelar la reserva",
-            "detalle": str(e)
-        }), 400
+        return respuesta_error_reserva(e, "No se pudo cancelar la reserva")
 
 @app.route("/api/reservas/<int:reserva_id>/asientos", methods=["PUT"])
 def actualizar_reserva_asientos(reserva_id):
@@ -255,10 +294,7 @@ def actualizar_reserva_asientos(reserva_id):
         return jsonify({"mensaje": "Reserva actualizada correctamente", "asientos": asientos}), 200
 
     except Exception as e:
-        return jsonify({
-            "error": "No se pudo actualizar la reserva",
-            "detalle": str(e)
-        }), 400
+        return respuesta_error_reserva(e, "No se pudo actualizar la reserva")
 
 @app.route("/api/vuelos/<int:vuelo_id>/asientos", methods=["GET"])
 def listar_asientos_vuelo(vuelo_id):
@@ -277,6 +313,25 @@ def listar_asientos_vuelo(vuelo_id):
             "error": "No se pudieron obtener los asientos del vuelo",
             "detalle": str(e)
         }), 500
+
+
+@app.route("/api/reservas/<int:reserva_id>/boletos.pdf", methods=["GET"])
+def descargar_boletos(reserva_id):
+    usuario, error, codigo = obtener_usuario_desde_token()
+    if error:
+        return error, codigo
+
+    reserva = boleto_pdf_service.obtener_reserva(usuario["id"], reserva_id)
+    if reserva is None:
+        return jsonify({"error": "Reserva activa no encontrada"}), 404
+
+    archivo = boleto_pdf_service.generar(reserva)
+    return send_file(
+        archivo,
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=f"flygo-{reserva['codigo_reserva']}.pdf",
+    )
     
 @app.route("/api/reservas/asientos", methods=["POST"])
 def reservar_asientos():
@@ -318,10 +373,7 @@ def reservar_asientos():
         }), 201
 
     except Exception as e:
-        return jsonify({
-            "error": "No se pudo registrar la reserva",
-            "detalle": str(e)
-        }), 400
+        return respuesta_error_reserva(e, "No se pudo registrar la reserva")
 
 @app.route("/api/admin/vuelos", methods=["POST"])
 def crear_vuelo():
@@ -395,7 +447,8 @@ def editar_vuelo(vuelo_id):
         "fecha",
         "hora_salida",
         "hora_llegada",
-        "precio"
+        "precio",
+        "cantidad_asientos"
     ]
 
     for campo in campos:
@@ -413,10 +466,7 @@ def editar_vuelo(vuelo_id):
         }), 200
 
     except Exception as e:
-        return jsonify({
-            "error": "No se pudo actualizar el vuelo",
-            "detalle": str(e)
-        }), 400
+        return respuesta_error_reserva(e, "No se pudo actualizar el vuelo")
 
 @app.route("/api/admin/vuelos/<int:vuelo_id>", methods=["DELETE"])
 def eliminar_vuelo(vuelo_id):

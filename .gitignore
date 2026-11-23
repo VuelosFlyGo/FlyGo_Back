@@ -146,3 +146,11 @@ cython_debug/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Runtime and generated artifacts
+output/
+server.stdout.log
+server.stderr.log
+flygo-backend.log
+flygo-backend-error.log
+*.pdf

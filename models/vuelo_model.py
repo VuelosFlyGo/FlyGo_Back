@@ -12,6 +12,7 @@ class VueloModel:
     hora_llegada: str
     precio: float
     asientos_disponibles: int
+    total_asientos: int
 
     @staticmethod
     def from_row(row: Dict[str, Any]) -> "VueloModel":
@@ -25,6 +26,7 @@ class VueloModel:
             hora_llegada=str(row["hora_llegada"]),
             precio=float(row["precio"]),
             asientos_disponibles=row["asientos_disponibles"],
+            total_asientos=row["total_asientos"],
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -38,4 +40,5 @@ class VueloModel:
             "hora_llegada": self.hora_llegada,
             "precio": self.precio,
             "asientos_disponibles": self.asientos_disponibles,
+            "total_asientos": self.total_asientos,
         }
