@@ -27,7 +27,7 @@ class VueloService:
                        END AS situacion,
                        (SELECT COUNT(*) FROM asientos_vuelo av WHERE av.vuelo_id = vuelos.id) AS total_asientos
                 FROM vuelos
-                WHERE (%s = TRUE OR estado = TRUE)
+                WHERE estado = TRUE
                   AND (
                       %s = TRUE
                       OR (fecha + hora_salida) >
@@ -40,7 +40,6 @@ class VueloService:
                   AND (%s IS NULL OR fecha <= %s)
                 ORDER BY fecha, hora_salida
             """, (
-                incluir_historial,
                 incluir_historial,
                 incluir_agotados,
                 origen, f"%{origen}%" if origen else None,
