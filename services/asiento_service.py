@@ -68,6 +68,7 @@ class AsientoService:
         cursor = conexion.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
         try:
+            cursor.execute("SET LOCAL lock_timeout = '5s'")
             cursor.execute("""
                 SELECT 
                     reserva_id,
@@ -103,9 +104,24 @@ class AsientoService:
 
     def actualizar_reserva_con_asientos(self, usuario_id, reserva_id, asientos):
         conexion = Database.obtener_conexion()
-        cursor = conexion.cursor()
+        cursor = conexion.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
         try:
+            cursor.execute("SET LOCAL lock_timeout = '5s'")
+            cursor.execute("""
+                SELECT modificada
+                FROM reservas
+                WHERE id = %s AND usuario_id = %s
+                FOR UPDATE
+            """, (reserva_id, usuario_id))
+            reserva = cursor.fetchone()
+
+            if reserva is None:
+                raise ValueError("Reserva no encontrada")
+
+            if reserva["modificada"]:
+                raise ValueError("Esta reserva ya fue modificada y no admite nuevos cambios")
+
             cursor.execute("""
                 SELECT actualizar_reserva_asientos_segura(%s, %s, %s)
             """, (
@@ -113,6 +129,11 @@ class AsientoService:
                 reserva_id,
                 asientos
             ))
+            cursor.execute("""
+                UPDATE reservas
+                SET modificada = TRUE
+                WHERE id = %s AND usuario_id = %s
+            """, (reserva_id, usuario_id))
             conexion.commit()
         except Exception as e:
             conexion.rollback()

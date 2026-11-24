@@ -1,4 +1,5 @@
 import psycopg2.extras
+import jwt
 from database import Database
 from utils.seguridad import Seguridad
 
@@ -25,16 +26,16 @@ class AuthService:
             if fila is None:
                 return None
 
-            token = Seguridad.generar_token()
-            expiracion = Seguridad.fecha_expiracion_token()
+            token, jti, expiracion = Seguridad.generar_token(fila)
 
             cursor.execute("""
                 INSERT INTO tokens
                 (usuario_id, token, fecha_expiracion, activo)
-                VALUES (%s, %s,  NOW() + INTERVAL '2 hours', TRUE)
+                VALUES (%s, %s, %s, TRUE)
             """, (
                 fila["id"],
-                token
+                jti,
+                expiracion,
             ))
 
             conexion.commit()
@@ -61,6 +62,13 @@ class AuthService:
             conexion.close()
 
     def validar_token(self, token):
+        try:
+            payload = Seguridad.decodificar_token(token)
+            usuario_id = int(payload["sub"])
+            jti = payload["jti"]
+        except (jwt.PyJWTError, KeyError, TypeError, ValueError):
+            return None
+
         conexion = Database.obtener_conexion()
         cursor = conexion.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
@@ -70,10 +78,11 @@ class AuthService:
                 FROM tokens t
                 INNER JOIN usuarios u ON u.id = t.usuario_id
                 WHERE t.token = %s
+                  AND t.usuario_id = %s
                   AND t.activo = TRUE
                   AND t.fecha_expiracion > NOW()
                   AND u.estado = TRUE
-            """, (token,))
+            """, (jti, usuario_id))
 
             fila = cursor.fetchone()
 
@@ -93,6 +102,16 @@ class AuthService:
             conexion.close()
 
     def logout(self, token):
+        try:
+            payload = Seguridad.decodificar_token(
+                token,
+                verificar_expiracion=False,
+            )
+            jti = payload["jti"]
+            usuario_id = int(payload["sub"])
+        except (jwt.PyJWTError, KeyError, TypeError, ValueError):
+            return False
+
         conexion = Database.obtener_conexion()
         cursor = conexion.cursor()
 
@@ -100,11 +119,11 @@ class AuthService:
             cursor.execute("""
                 UPDATE tokens
                 SET activo = FALSE
-                WHERE token = %s
-            """, (token,))
+                WHERE token = %s AND usuario_id = %s
+            """, (jti, usuario_id))
 
             conexion.commit()
-            return True
+            return cursor.rowcount > 0
 
         except Exception as e:
             conexion.rollback()
