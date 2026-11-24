@@ -70,6 +70,18 @@ class AsientoService:
         try:
             cursor.execute("SET LOCAL lock_timeout = '5s'")
             cursor.execute("""
+                SELECT id
+                FROM vuelos
+                WHERE id = %s
+                  AND estado = TRUE
+                  AND (fecha + hora_salida) >
+                      (CURRENT_TIMESTAMP AT TIME ZONE 'America/Guayaquil')
+                FOR SHARE
+            """, (vuelo_id,))
+            if cursor.fetchone() is None:
+                raise ValueError("El vuelo ya finalizó o no se encuentra vigente")
+
+            cursor.execute("""
                 SELECT 
                     reserva_id,
                     codigo_reserva,

@@ -189,6 +189,7 @@ def vuelos():
             fecha_inicio,
             fecha_fin,
             incluir_agotados=usuario.get("rol") == "admin",
+            incluir_historial=usuario.get("rol") == "admin",
         )
         return jsonify(vuelos_disponibles), 200
 
@@ -520,7 +521,7 @@ def eliminar_vuelo(vuelo_id):
 
     try:
         admin_vuelo_service.eliminar_vuelo(vuelo_id)
-        return jsonify({"mensaje": "Vuelo eliminado correctamente"}), 200
+        return jsonify({"mensaje": "Vuelo desactivado correctamente"}), 200
 
     except Exception as e:
         return jsonify({
