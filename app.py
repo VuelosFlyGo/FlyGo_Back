@@ -464,6 +464,23 @@ def crear_vuelo():
             "detalle": str(e)
         }), 400
 
+
+@app.route("/api/admin/dashboard", methods=["GET"])
+def dashboard_admin():
+    usuario, error, codigo = obtener_usuario_desde_token()
+    if error:
+        return error, codigo
+    if usuario.get("rol") != "admin":
+        return jsonify({"error": "No tiene permisos de administrador"}), 403
+
+    try:
+        return jsonify(admin_vuelo_service.obtener_dashboard()), 200
+    except Exception as e:
+        return jsonify({
+            "error": "No se pudo obtener el dashboard administrativo",
+            "detalle": str(e),
+        }), 500
+
 @app.route("/api/admin/vuelos/<int:vuelo_id>", methods=["PUT"])
 def editar_vuelo(vuelo_id):
     usuario, error, codigo = obtener_usuario_desde_token()

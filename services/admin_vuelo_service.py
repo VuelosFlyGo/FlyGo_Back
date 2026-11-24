@@ -226,7 +226,8 @@ class AdminVueloService:
 
             cursor.execute("""
                 UPDATE vuelos
-                SET estado = FALSE
+                SET estado = FALSE,
+                    fecha_desactivacion = CURRENT_TIMESTAMP
                 WHERE id = %s
                 RETURNING id
             """, (vuelo_id,))
@@ -245,3 +246,107 @@ class AdminVueloService:
         finally:
             cursor.close()
             conexion.close()
+
+    def obtener_dashboard(self):
+        conexion = Database.obtener_conexion()
+        cursor = conexion.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+        try:
+            cursor.execute("""
+                SELECT
+                    COUNT(*) FILTER (
+                        WHERE v.estado = TRUE
+                          AND (v.fecha + v.hora_salida) >
+                              (CURRENT_TIMESTAMP AT TIME ZONE 'America/Guayaquil')
+                    ) AS vuelos_vigentes,
+                    COUNT(*) FILTER (
+                        WHERE v.estado = TRUE
+                          AND (v.fecha + v.hora_salida) <=
+                              (CURRENT_TIMESTAMP AT TIME ZONE 'America/Guayaquil')
+                    ) AS vuelos_finalizados,
+                    COUNT(*) FILTER (WHERE v.estado = FALSE) AS vuelos_inactivos,
+                    COALESCE(SUM(v.asientos_disponibles) FILTER (
+                        WHERE v.estado = TRUE
+                          AND (v.fecha + v.hora_salida) >
+                              (CURRENT_TIMESTAMP AT TIME ZONE 'America/Guayaquil')
+                    ), 0) AS asientos_disponibles,
+                    (SELECT COUNT(*) FROM reservas r WHERE r.estado = 'ACTIVA')
+                        AS reservas_activas,
+                    (SELECT COALESCE(SUM(r.cantidad_asientos), 0)
+                     FROM reservas r WHERE r.estado = 'ACTIVA')
+                        AS pasajeros_confirmados,
+                    (SELECT COALESCE(SUM(r.total), 0)
+                     FROM reservas r WHERE r.estado = 'ACTIVA')
+                        AS ingresos_confirmados,
+                    (SELECT COUNT(*) FROM usuarios u
+                     WHERE u.estado = TRUE AND u.rol <> 'admin')
+                        AS clientes_activos
+                FROM vuelos v
+            """)
+            resumen = cursor.fetchone()
+
+            cursor.execute("""
+                SELECT id, aerolinea, origen, destino, fecha,
+                       hora_salida, hora_llegada, precio,
+                       asientos_disponibles
+                FROM vuelos
+                WHERE estado = TRUE
+                  AND (fecha + hora_salida) >
+                      (CURRENT_TIMESTAMP AT TIME ZONE 'America/Guayaquil')
+                ORDER BY fecha, hora_salida
+                LIMIT 5
+            """)
+            proximos = [self._serializar_vuelo(fila) for fila in cursor.fetchall()]
+
+            cursor.execute("""
+                SELECT v.id, v.aerolinea, v.origen, v.destino, v.fecha,
+                       v.hora_salida, v.hora_llegada, v.precio,
+                       v.asientos_disponibles, v.fecha_desactivacion,
+                       COUNT(r.id) AS reservas_relacionadas
+                FROM vuelos v
+                LEFT JOIN reservas r ON r.vuelo_id = v.id
+                WHERE v.estado = FALSE
+                GROUP BY v.id
+                ORDER BY v.fecha_desactivacion DESC NULLS LAST, v.id DESC
+            """)
+            auditoria = []
+            for fila in cursor.fetchall():
+                item = self._serializar_vuelo(fila)
+                item["fecha_desactivacion"] = (
+                    fila["fecha_desactivacion"].isoformat()
+                    if fila["fecha_desactivacion"] else None
+                )
+                item["reservas_relacionadas"] = fila["reservas_relacionadas"]
+                auditoria.append(item)
+
+            return {
+                "resumen": {
+                    "vuelos_vigentes": resumen["vuelos_vigentes"],
+                    "vuelos_finalizados": resumen["vuelos_finalizados"],
+                    "vuelos_inactivos": resumen["vuelos_inactivos"],
+                    "asientos_disponibles": resumen["asientos_disponibles"],
+                    "reservas_activas": resumen["reservas_activas"],
+                    "pasajeros_confirmados": resumen["pasajeros_confirmados"],
+                    "ingresos_confirmados": float(resumen["ingresos_confirmados"]),
+                    "clientes_activos": resumen["clientes_activos"],
+                },
+                "proximos_vuelos": proximos,
+                "auditoria": auditoria,
+            }
+        finally:
+            cursor.close()
+            conexion.close()
+
+    @staticmethod
+    def _serializar_vuelo(fila):
+        return {
+            "id": fila["id"],
+            "aerolinea": fila["aerolinea"],
+            "origen": fila["origen"],
+            "destino": fila["destino"],
+            "fecha": str(fila["fecha"]),
+            "hora_salida": str(fila["hora_salida"]),
+            "hora_llegada": str(fila["hora_llegada"]),
+            "precio": float(fila["precio"]),
+            "asientos_disponibles": fila["asientos_disponibles"],
+        }
