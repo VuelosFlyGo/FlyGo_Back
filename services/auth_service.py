@@ -66,6 +66,8 @@ class AuthService:
             payload = Seguridad.decodificar_token(token)
             usuario_id = int(payload["sub"])
             jti = payload["jti"]
+        except jwt.ExpiredSignatureError:
+            raise
         except (jwt.PyJWTError, KeyError, TypeError, ValueError):
             return None
 
@@ -103,10 +105,7 @@ class AuthService:
 
     def logout(self, token):
         try:
-            payload = Seguridad.decodificar_token(
-                token,
-                verificar_expiracion=False,
-            )
+            payload = Seguridad.decodificar_token(token)
             jti = payload["jti"]
             usuario_id = int(payload["sub"])
         except (jwt.PyJWTError, KeyError, TypeError, ValueError):
@@ -119,8 +118,17 @@ class AuthService:
             cursor.execute("""
                 UPDATE tokens
                 SET activo = FALSE
-                WHERE token = %s AND usuario_id = %s
-            """, (jti, usuario_id))
+                WHERE usuario_id = %s
+                  AND activo = TRUE
+                  AND EXISTS (
+                      SELECT 1
+                      FROM tokens AS sesion
+                      WHERE sesion.token = %s
+                        AND sesion.usuario_id = %s
+                        AND sesion.activo = TRUE
+                        AND sesion.fecha_expiracion > NOW()
+                  )
+            """, (usuario_id, jti, usuario_id))
 
             conexion.commit()
             return cursor.rowcount > 0

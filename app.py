@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
+from jwt import ExpiredSignatureError
 
 from services.usuario_service import UsuarioService
 from services.auth_service import AuthService
@@ -27,6 +28,8 @@ def respuesta_error_reserva(error, mensaje):
     """Distingue una petición inválida de un conflicto transaccional."""
     codigo_postgres = getattr(error, "pgcode", None)
     detalle = str(error)
+    if detalle.startswith("La tarifa cambió."):
+        return jsonify({"error": detalle, "codigo": "TARIFA_ACTUALIZADA"}), 409
     conflicto = codigo_postgres in {"40001", "40P01", "55P03", "23505"} or any(
         texto in detalle.lower()
         for texto in (
@@ -73,8 +76,13 @@ def obtener_usuario_desde_token():
         if usuario is None:
             return None, jsonify({"error": "Token inválido o expirado"}), 401
         return usuario, None, None
+    except ExpiredSignatureError:
+        return None, jsonify({
+            "error": "La sesión expiró",
+            "codigo": "SESION_EXPIRADA",
+        }), 401
     except Exception as e:
-        return None, jsonify({"error": "Error al validar token", "detalle": str(e)}), 500   
+        return None, jsonify({"error": "Error al validar token", "detalle": str(e)}), 500
 
 @app.route("/")
 def inicio():
@@ -146,6 +154,14 @@ def login():
         }), 500
 
 
+@app.get("/api/auth/session")
+def consultar_sesion():
+    _, error, codigo = obtener_usuario_desde_token()
+    respuesta = error if error is not None else app.response_class(status=204)
+    respuesta.headers["Cache-Control"] = "no-store"
+    return respuesta, codigo or 204
+
+
 @app.route("/api/auth/logout", methods=["POST"])
 def logout():
     auth_header = request.headers.get("Authorization")
@@ -156,7 +172,7 @@ def logout():
     try:
         if not auth_service.logout(token):
             return jsonify({"error": "Token inválido"}), 401
-        return jsonify({"mensaje": "Sesión cerrada correctamente"}), 200
+        return jsonify({"mensaje": "Sesiones de la cuenta cerradas correctamente"}), 200
     except Exception as e:
         return jsonify({
             "error": "No se pudo cerrar la sesión",
@@ -193,6 +209,8 @@ def vuelos():
         )
         return jsonify(vuelos_disponibles), 200
 
+    except ValueError as e:
+        return jsonify({"error": str(e), "codigo": "FECHAS_INVALIDAS"}), 400
     except Exception as e:
         return jsonify({
             "error": "No se pudieron obtener los vuelos",
@@ -268,6 +286,12 @@ def cancelar(reserva_id):
         if resultado == "NO_ACTIVA":
             return jsonify({"error": "La reserva no se encuentra activa"}), 400
 
+        if resultado == "PLAZO_CANCELACION_VENCIDO":
+            return jsonify({
+                "error": "Solo puedes cancelar una reserva con al menos 24 horas de anticipación a la salida del vuelo.",
+                "codigo": resultado
+            }), 400
+
         return jsonify({"mensaje": "Reserva cancelada correctamente"}), 200
 
     except Exception as e:
@@ -292,7 +316,8 @@ def actualizar_reserva_asientos(reserva_id):
         asiento_service.actualizar_reserva_con_asientos(
             usuario["id"],
             reserva_id,
-            asientos
+            asientos,
+            datos.get("total_esperado")
         )
         return jsonify({"mensaje": "Reserva actualizada correctamente", "asientos": asientos}), 200
 
@@ -405,7 +430,8 @@ def reservar_asientos():
         reserva = asiento_service.crear_reserva_con_asientos(
             usuario["id"],
             int(vuelo_id),
-            asientos
+            asientos,
+            datos.get("total_esperado")
         )
 
         return jsonify({
@@ -415,6 +441,19 @@ def reservar_asientos():
 
     except Exception as e:
         return respuesta_error_reserva(e, "No se pudo registrar la reserva")
+
+@app.get("/api/admin/aviones")
+def listar_aviones():
+    usuario, error, codigo = obtener_usuario_desde_token()
+    if error:
+        return error, codigo
+    if usuario.get("rol") != "admin":
+        return jsonify({"error": "No tiene permisos de administrador"}), 403
+    try:
+        return jsonify(admin_vuelo_service.listar_aviones()), 200
+    except Exception:
+        return jsonify({"error": "No se pudo cargar el catálogo de aeronaves"}), 500
+
 
 @app.route("/api/admin/vuelos", methods=["POST"])
 def crear_vuelo():
@@ -441,7 +480,7 @@ def crear_vuelo():
         "hora_salida",
         "hora_llegada",
         "precio",
-        "cantidad_asientos"
+        "avion_id"
     ]
 
     for campo in campos:
@@ -505,8 +544,7 @@ def editar_vuelo(vuelo_id):
         "fecha",
         "hora_salida",
         "hora_llegada",
-        "precio",
-        "cantidad_asientos"
+        "precio"
     ]
 
     for campo in campos:

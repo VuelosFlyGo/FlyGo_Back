@@ -18,7 +18,7 @@ class ReservaService:
                   AND estado = TRUE
                   AND (fecha + hora_salida) >
                       (CURRENT_TIMESTAMP AT TIME ZONE 'America/Guayaquil')
-                FOR SHARE
+                FOR UPDATE
             """, (vuelo_id,))
             if cursor.fetchone() is None:
                 raise ValueError("El vuelo ya finalizó o no se encuentra vigente")
@@ -72,6 +72,10 @@ class ReservaService:
                     v.hora_salida,
                     v.hora_llegada,
                     v.precio AS precio_actual,
+                    (r.estado = 'ACTIVA' AND v.estado = TRUE AND
+                     (v.fecha + v.hora_salida) >=
+                         (clock_timestamp() AT TIME ZONE 'America/Guayaquil') + INTERVAL '24 hours')
+                        AS puede_cancelar,
                     COALESCE(
                         ARRAY_AGG(av.numero_asiento ORDER BY av.numero_asiento)
                         FILTER (WHERE av.numero_asiento IS NOT NULL),
@@ -96,7 +100,8 @@ class ReservaService:
                     v.fecha,
                     v.hora_salida,
                     v.hora_llegada,
-                    v.precio
+                    v.precio,
+                    v.estado
                 ORDER BY r.fecha_reserva DESC
             """, (usuario_id,))
 
@@ -118,6 +123,7 @@ class ReservaService:
                     "fecha_vuelo": str(fila["fecha"]),
                     "hora_salida": str(fila["hora_salida"]),
                     "hora_llegada": str(fila["hora_llegada"]),
+                    "puede_cancelar": bool(fila["puede_cancelar"]),
                     "precio_actual": float(fila["precio_actual"]),
                     "asientos": list(fila["asientos"])
                 })
@@ -163,6 +169,22 @@ class ReservaService:
                 WHERE id = %s
                 FOR UPDATE
             """, (reserva["vuelo_id"],))
+            if cursor.fetchone() is None:
+                conexion.rollback()
+                return "NO_ACTIVA"
+
+            # Consultar el reloj después de adquirir el bloqueo del vuelo.
+            # A las 24 horas exactas aún se admite la cancelación.
+            cursor.execute("""
+                SELECT estado AND (fecha + hora_salida) >=
+                    (clock_timestamp() AT TIME ZONE 'America/Guayaquil') + INTERVAL '24 hours'
+                    AS puede_cancelar
+                FROM vuelos
+                WHERE id = %s
+            """, (reserva["vuelo_id"],))
+            if not cursor.fetchone()["puede_cancelar"]:
+                conexion.rollback()
+                return "PLAZO_CANCELACION_VENCIDO"
 
             cursor.execute("""
                 UPDATE reservas
@@ -173,7 +195,8 @@ class ReservaService:
             cursor.execute("""
                 UPDATE asientos_vuelo
                 SET estado = 'DISPONIBLE',
-                    reserva_id = NULL
+                    reserva_id = NULL,
+                    precio_reservado = NULL
                 WHERE reserva_id = %s
             """, (reserva_id,))
 

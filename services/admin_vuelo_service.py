@@ -1,15 +1,100 @@
 import psycopg2.extras
+from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from database import Database
 
 
 class AdminVueloService:
+    @staticmethod
+    def _validar_itinerario(datos, actual=None):
+        zona = timezone(timedelta(hours=-5))
+        ahora = datetime.now(zona)
+        try:
+            fecha = date.fromisoformat(datos["fecha"])
+            salida = time.fromisoformat(datos["hora_salida"])
+            llegada = time.fromisoformat(datos["hora_llegada"])
+            if fecha.isoformat() != datos["fecha"] or salida.tzinfo or llegada.tzinfo:
+                raise ValueError
+        except (KeyError, ValueError, TypeError) as error:
+            raise ValueError("Ingrese una fecha y horarios válidos") from error
+
+        # Permite actualizar datos de un vuelo histórico si conserva sus horarios.
+        if actual and (fecha, salida, llegada) == (
+            actual["fecha"], actual["hora_salida"], actual["hora_llegada"]
+        ):
+            return
+        if fecha < ahora.date() or fecha > ahora.date() + timedelta(days=730):
+            raise ValueError("La fecha debe estar entre hoy y los próximos 730 días")
+        if datetime.combine(fecha, salida, zona) <= ahora:
+            raise ValueError("La fecha y hora de salida deben ser posteriores a las actuales")
+        if llegada <= salida:
+            raise ValueError("La hora de llegada debe ser posterior a la de salida")
+
+    @staticmethod
+    def _tarifas(datos, avion_id, precio_actual=None):
+        try:
+            turista = Decimal(str(datos["precio"])).quantize(Decimal("0.01"))
+            if not turista.is_finite() or turista <= 0:
+                raise ValueError("La tarifa turista debe ser mayor a cero")
+            if avion_id is None:
+                return turista, None
+            valor = datos.get("precio_ejecutiva")
+            if valor is None:
+                valor = precio_actual if precio_actual is not None else max(
+                    turista * Decimal("1.5"), turista + Decimal("0.01"))
+            ejecutiva = Decimal(str(valor)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            if not ejecutiva.is_finite() or ejecutiva <= turista:
+                raise ValueError("La tarifa ejecutiva debe ser mayor que la turista")
+            return turista, ejecutiva
+        except InvalidOperation as error:
+            raise ValueError("Las tarifas deben ser importes válidos") from error
+
+    def listar_aviones(self):
+        conexion = Database.obtener_conexion()
+        try:
+            with conexion.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT id, modelo, asientos_ejecutiva, asientos_turista,
+                           asientos_ejecutiva + asientos_turista AS capacidad
+                    FROM aviones ORDER BY capacidad, modelo
+                """)
+                return cursor.fetchall()
+        finally:
+            conexion.close()
+
+    def _obtener_avion(self, cursor, avion_id):
+        cursor.execute("""
+            SELECT id, modelo, asientos_ejecutiva, asientos_turista
+            FROM aviones WHERE id = %s
+        """, (avion_id,))
+        avion = cursor.fetchone()
+        if avion is None:
+            raise ValueError("Seleccione una aeronave del catálogo")
+        return avion
+
+    def _configurar_asientos(self, avion):
+        ejecutiva = avion["asientos_ejecutiva"]
+        cantidad = ejecutiva + avion["asientos_turista"]
+        return {
+            numero: "EJECUTIVA" if indice < ejecutiva else "TURISTA"
+            for indice, numero in enumerate(self.generar_asientos(cantidad))
+        }
 
     def crear_vuelo_con_asientos(self, datos):
+        self._validar_itinerario(datos)
         conexion = Database.obtener_conexion()
         cursor = conexion.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
         try:
-            cantidad_asientos = int(datos["cantidad_asientos"])
+            avion_id = datos.get("avion_id")
+            if avion_id is not None:
+                avion = self._obtener_avion(cursor, avion_id)
+                asientos = self._configurar_asientos(avion)
+            else:
+                cantidad = int(datos["cantidad_asientos"])
+                asientos = dict.fromkeys(self.generar_asientos(cantidad), "TURISTA")
+            cantidad_asientos = len(asientos)
+            precio, precio_ejecutiva = self._tarifas(datos, avion_id)
 
             if cantidad_asientos <= 0:
                 raise Exception("La cantidad de asientos debe ser mayor a cero")
@@ -23,10 +108,12 @@ class AdminVueloService:
                     hora_salida,
                     hora_llegada,
                     precio,
+                    precio_ejecutiva,
                     asientos_disponibles,
-                    estado
+                    estado,
+                    avion_id
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s)
                 RETURNING id, aerolinea, origen, destino, fecha, hora_salida, hora_llegada, precio, asientos_disponibles
             """, (
                 datos["aerolinea"],
@@ -35,27 +122,25 @@ class AdminVueloService:
                 datos["fecha"],
                 datos["hora_salida"],
                 datos["hora_llegada"],
-                datos["precio"],
-                cantidad_asientos
+                precio,
+                precio_ejecutiva,
+                cantidad_asientos,
+                avion_id
             ))
 
             vuelo = cursor.fetchone()
             vuelo_id = vuelo["id"]
 
-            asientos = self.generar_asientos(cantidad_asientos)
-
-            for numero_asiento in asientos:
-                cursor.execute("""
+            psycopg2.extras.execute_values(cursor, """
                     INSERT INTO asientos_vuelo (
                         vuelo_id,
                         numero_asiento,
-                        estado
+                        estado,
+                        clase
                     )
-                    VALUES (%s, %s, 'DISPONIBLE')
-                """, (
-                    vuelo_id,
-                    numero_asiento
-                ))
+                    VALUES %s
+                """, [(vuelo_id, numero, 'DISPONIBLE', clase)
+                      for numero, clase in asientos.items()])
 
             conexion.commit()
 
@@ -68,8 +153,11 @@ class AdminVueloService:
                 "hora_salida": str(vuelo["hora_salida"]),
                 "hora_llegada": str(vuelo["hora_llegada"]),
                 "precio": float(vuelo["precio"]),
+                "precio_ejecutiva": float(precio_ejecutiva) if precio_ejecutiva is not None else None,
                 "asientos_disponibles": vuelo["asientos_disponibles"],
-                "asientos_generados": asientos
+                "avion_id": avion_id,
+                "total_asientos": cantidad_asientos,
+                "asientos_generados": list(asientos)
             }
 
         except Exception as e:
@@ -99,18 +187,17 @@ class AdminVueloService:
         cursor = conexion.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
         try:
-            cantidad_asientos = int(datos["cantidad_asientos"])
-            if cantidad_asientos <= 0:
-                raise Exception("La capacidad debe ser mayor a cero")
-
             cursor.execute("""
-                SELECT id
+                SELECT id, avion_id, asientos_disponibles, precio_ejecutiva,
+                       fecha, hora_salida, hora_llegada
                 FROM vuelos
                 WHERE id = %s
                 FOR UPDATE
             """, (vuelo_id,))
-            if cursor.fetchone() is None:
+            actual = cursor.fetchone()
+            if actual is None:
                 raise Exception("Vuelo no encontrado")
+            self._validar_itinerario(datos, actual)
 
             cursor.execute("""
                 SELECT id, numero_asiento, reserva_id
@@ -123,13 +210,38 @@ class AdminVueloService:
             """, (vuelo_id,))
             asientos_actuales = cursor.fetchall()
             reservados = [a for a in asientos_actuales if a["reserva_id"] is not None]
+            avion_id = datos.get("avion_id")
+            if avion_id is None:
+                avion_id = actual["avion_id"]
+            precio, precio_ejecutiva = self._tarifas(datos, avion_id, actual["precio_ejecutiva"])
+            total_actual = len(asientos_actuales)
+            if avion_id is not None:
+                avion = self._obtener_avion(cursor, avion_id)
+                plantilla = self._configurar_asientos(avion)
+                cantidad_asientos = len(plantilla)
+                if avion_id != actual["avion_id"]:
+                    cursor.execute("SELECT 1 FROM reservas WHERE vuelo_id = %s LIMIT 1", (vuelo_id,))
+                    if reservados or cursor.fetchone():
+                        raise ValueError("No se puede cambiar la aeronave de un vuelo con reservas")
+                    cursor.execute("DELETE FROM asientos_vuelo WHERE vuelo_id = %s", (vuelo_id,))
+                    psycopg2.extras.execute_values(cursor, """
+                        INSERT INTO asientos_vuelo (vuelo_id, numero_asiento, estado, clase)
+                        VALUES %s
+                    """, [(vuelo_id, numero, 'DISPONIBLE', clase)
+                          for numero, clase in plantilla.items()])
+                    total_actual = cantidad_asientos
+                elif total_actual != cantidad_asientos:
+                    raise ValueError("La capacidad del vuelo no coincide con su aeronave")
+            else:
+                cantidad_asientos = int(datos.get("cantidad_asientos", total_actual or actual["asientos_disponibles"]))
+            if cantidad_asientos <= 0:
+                raise Exception("La capacidad debe ser mayor a cero")
 
             if cantidad_asientos < len(reservados):
                 raise Exception(
                     f"La capacidad no puede ser menor a los {len(reservados)} asientos ya reservados"
                 )
 
-            total_actual = len(asientos_actuales)
             if cantidad_asientos > total_actual:
                 existentes = {a["numero_asiento"] for a in asientos_actuales}
                 for numero_asiento in self.generar_asientos(cantidad_asientos):
@@ -163,7 +275,9 @@ class AdminVueloService:
                     hora_salida = %s,
                     hora_llegada = %s,
                     precio = %s,
+                    precio_ejecutiva = %s,
                     estado = %s,
+                    avion_id = %s,
                     asientos_disponibles = %s,
                     version = version + 1
                 WHERE id = %s
@@ -175,8 +289,10 @@ class AdminVueloService:
                 datos["fecha"],
                 datos["hora_salida"],
                 datos["hora_llegada"],
-                datos["precio"],
+                precio,
+                precio_ejecutiva,
                 datos.get("estado", True),
+                avion_id,
                 asientos_disponibles,
                 vuelo_id
             ))
@@ -196,8 +312,10 @@ class AdminVueloService:
                 "hora_salida": str(vuelo["hora_salida"]),
                 "hora_llegada": str(vuelo["hora_llegada"]),
                 "precio": float(vuelo["precio"]),
+                "precio_ejecutiva": float(precio_ejecutiva) if precio_ejecutiva is not None else None,
                 "asientos_disponibles": vuelo["asientos_disponibles"],
                 "total_asientos": cantidad_asientos,
+                "avion_id": avion_id,
                 "estado": vuelo["estado"]
             }
 
@@ -214,7 +332,15 @@ class AdminVueloService:
         cursor = conexion.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
         try:
-            # Check for active reservations
+            cursor.execute("SET LOCAL lock_timeout = '5s'")
+            # El mismo bloqueo utilizado al reservar serializa ambas operaciones.
+            cursor.execute("""
+                SELECT id FROM vuelos WHERE id = %s FOR UPDATE
+            """, (vuelo_id,))
+            if cursor.fetchone() is None:
+                raise ValueError("Vuelo no encontrado")
+
+            # Las reservas canceladas son historial y no bloquean la desactivación.
             cursor.execute("""
                 SELECT COUNT(*) as total
                 FROM reservas
@@ -222,12 +348,13 @@ class AdminVueloService:
             """, (vuelo_id,))
             res = cursor.fetchone()
             if res and res["total"] > 0:
-                raise Exception("No se puede eliminar el vuelo porque tiene reservas activas.")
+                raise ValueError("No se puede desactivar el vuelo porque tiene reservas activas.")
 
             cursor.execute("""
                 UPDATE vuelos
                 SET estado = FALSE,
-                    fecha_desactivacion = CURRENT_TIMESTAMP
+                    fecha_desactivacion = CURRENT_TIMESTAMP,
+                    version = version + 1
                 WHERE id = %s
                 RETURNING id
             """, (vuelo_id,))

@@ -32,7 +32,11 @@ class FacturaService:
                         ARRAY_AGG(av.numero_asiento ORDER BY av.numero_asiento)
                         FILTER (WHERE av.numero_asiento IS NOT NULL),
                         ARRAY[]::VARCHAR[]
-                    ) AS asientos
+                    ) AS asientos,
+                    COALESCE(JSON_AGG(JSON_BUILD_OBJECT(
+                        'numero', av.numero_asiento, 'clase', av.clase,
+                        'precio', av.precio_reservado
+                    ) ORDER BY av.numero_asiento) FILTER (WHERE av.numero_asiento IS NOT NULL), '[]'::JSON) AS detalle_asientos
                 FROM reservas r
                 JOIN usuarios u ON u.id = r.usuario_id
                 JOIN vuelos v ON v.id = r.vuelo_id
@@ -90,16 +94,25 @@ class FacturaService:
             f"{factura['destino']} - {factura['fecha']} "
             f"{str(factura['hora_salida'])[:5]}"
         )
+        grupos = self._agrupar_tarifas(factura)
+        filas = [["Descripción", "Asientos", "Cantidad", "Total"]]
+        if grupos:
+            for (clase, precio), asientos in grupos.items():
+                filas.append([
+                    Paragraph(f"{descripcion}<br/>{clase.title()} - {self._dinero(precio)} c/u", estilos["BodyText"]),
+                    Paragraph(", ".join(asientos), estilos["BodyText"]),
+                    str(len(asientos)),
+                    self._dinero(precio * len(asientos)),
+                ])
+        else:
+            filas.append([
+                Paragraph(descripcion, estilos["BodyText"]),
+                Paragraph(", ".join(factura["asientos"]) or "Sin asignar", estilos["BodyText"]),
+                str(factura["cantidad_asientos"]),
+                self._dinero(factura["total"]),
+            ])
         detalle = Table(
-            [
-                ["Descripción", "Asientos", "Cantidad", "Total"],
-                [
-                    Paragraph(descripcion, estilos["BodyText"]),
-                    ", ".join(factura["asientos"]) or "Sin asignar",
-                    str(factura["cantidad_asientos"]),
-                    self._dinero(factura["total"]),
-                ],
-            ],
+            filas,
             colWidths=[82 * mm, 38 * mm, 22 * mm, 30 * mm],
         )
         detalle.setStyle(
@@ -165,13 +178,34 @@ class FacturaService:
         detalle = ET.SubElement(raiz, "detalle")
         ET.SubElement(detalle, "cantidad").text = str(factura["cantidad_asientos"])
         asientos = ET.SubElement(detalle, "asientos")
+        grupos = self._agrupar_tarifas(factura)
+        tarifas = {
+            numero: {"clase": clase, "precioUnitario": self._decimal(precio)}
+            for (clase, precio), numeros in grupos.items()
+            for numero in numeros
+        }
         for numero in factura["asientos"]:
-            ET.SubElement(asientos, "asiento").text = numero
+            ET.SubElement(asientos, "asiento", tarifas.get(numero, {})).text = numero
         ET.SubElement(detalle, "total", moneda="USD").text = self._decimal(factura["total"])
 
         ET.indent(raiz, space="  ")
         contenido = ET.tostring(raiz, encoding="utf-8", xml_declaration=True)
         return BytesIO(contenido)
+
+    @staticmethod
+    def _agrupar_tarifas(factura):
+        detalle = factura.get("detalle_asientos", [])
+        if len(detalle) != factura["cantidad_asientos"] or any(
+            item["precio"] is None for item in detalle
+        ):
+            return {}
+        grupos = {}
+        for item in detalle:
+            precio = Decimal(str(item["precio"]))
+            grupos.setdefault((item["clase"], precio), []).append(item["numero"])
+        if sum(precio * len(asientos) for (_, precio), asientos in grupos.items()) != Decimal(str(factura["total"])):
+            return {}
+        return grupos
 
     @staticmethod
     def _tabla_datos(filas):

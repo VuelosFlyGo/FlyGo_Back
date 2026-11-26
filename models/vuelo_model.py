@@ -15,6 +15,12 @@ class VueloModel:
     total_asientos: int
     estado: bool = True
     situacion: str = "VIGENTE"
+    avion_id: int | None = None
+    avion_modelo: str | None = None
+    precio_ejecutiva: float | None = None
+    ejecutiva_disponibles: int = 0
+    turista_disponibles: int = 0
+    reservas_activas: int = 0
 
     @staticmethod
     def from_row(row: Dict[str, Any]) -> "VueloModel":
@@ -31,6 +37,12 @@ class VueloModel:
             total_asientos=row["total_asientos"],
             estado=row.get("estado", True),
             situacion=row.get("situacion", "VIGENTE"),
+            avion_id=row.get("avion_id"),
+            avion_modelo=row.get("avion_modelo"),
+            precio_ejecutiva=float(row["precio_ejecutiva"]) if row.get("precio_ejecutiva") is not None else None,
+            ejecutiva_disponibles=row.get("ejecutiva_disponibles", 0),
+            turista_disponibles=row.get("turista_disponibles", row["asientos_disponibles"]),
+            reservas_activas=row.get("reservas_activas", 0),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -47,4 +59,10 @@ class VueloModel:
             "total_asientos": self.total_asientos,
             "estado": self.estado,
             "situacion": self.situacion,
+            "avion_id": self.avion_id,
+            "avion_modelo": self.avion_modelo,
+            "precio_ejecutiva": self.precio_ejecutiva,
+            "ejecutiva_disponibles": self.ejecutiva_disponibles,
+            "turista_disponibles": self.turista_disponibles,
+            "reservas_activas": self.reservas_activas,
         }

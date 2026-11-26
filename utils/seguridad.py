@@ -21,10 +21,16 @@ class Seguridad:
         return secret
 
     @staticmethod
-    def generar_token(usuario):
-        ahora = datetime.now(timezone.utc)
+    def _duracion_sesion():
         minutos = int(os.getenv("JWT_EXPIRATION_MINUTES", "120"))
-        expiracion = ahora + timedelta(minutes=minutos)
+        if minutos <= 0:
+            raise ValueError("JWT_EXPIRATION_MINUTES debe ser mayor a cero")
+        return timedelta(minutes=minutos)
+
+    @staticmethod
+    def generar_token(usuario):
+        ahora = datetime.now(timezone.utc).replace(microsecond=0)
+        expiracion = ahora + Seguridad._duracion_sesion()
         jti = secrets.token_hex(16)
         payload = {
             "sub": str(usuario["id"]),
@@ -44,11 +50,18 @@ class Seguridad:
 
     @staticmethod
     def decodificar_token(token, verificar_expiracion=True):
-        return jwt.decode(
+        payload = jwt.decode(
             token,
             Seguridad._jwt_secret(),
             algorithms=["HS256"],
             audience="flygo-app",
             issuer="flygo-api",
-            options={"verify_exp": verificar_expiracion},
+            options={"verify_exp": verificar_expiracion, "require": ["iat", "exp"]},
         )
+        if verificar_expiracion:
+            limite = int(payload["iat"]) + Seguridad._duracion_sesion().total_seconds()
+            if datetime.now(timezone.utc).timestamp() >= limite:
+                raise jwt.ExpiredSignatureError(
+                    "Venció el tiempo de sesión configurado",
+                )
+        return payload

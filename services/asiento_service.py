@@ -1,9 +1,20 @@
 import psycopg2.extras
+from decimal import Decimal, InvalidOperation
 from database import Database
 from models.asiento_model import AsientoModel
 
 
 class AsientoService:
+    @staticmethod
+    def _verificar_total(total, esperado):
+        if esperado is None:
+            return
+        try:
+            correcto = Decimal(str(esperado)).quantize(Decimal("0.01")) == total
+        except InvalidOperation:
+            correcto = False
+        if not correcto:
+            raise ValueError("La tarifa cambió. Revise el total actualizado antes de confirmar.")
 
     def listar_asientos_por_vuelo(self, vuelo_id):
         conexion = Database.obtener_conexion()
@@ -39,13 +50,11 @@ class AsientoService:
 
             cursor.execute("""
                 SELECT 
-                    id,
-                    vuelo_id,
-                    numero_asiento,
-                    estado,
-                    reserva_id
-                FROM asientos_vuelo
-                WHERE vuelo_id = %s
+                    av.id, av.vuelo_id, av.numero_asiento, av.estado,
+                    av.reserva_id, av.clase,
+                    CASE WHEN av.clase = 'EJECUTIVA' THEN v.precio_ejecutiva ELSE v.precio END AS precio
+                FROM asientos_vuelo av JOIN vuelos v ON v.id = av.vuelo_id
+                WHERE av.vuelo_id = %s
                 ORDER BY 
                     CAST(regexp_replace(numero_asiento, '[^0-9]', '', 'g') AS INT),
                     regexp_replace(numero_asiento, '[0-9]', '', 'g')
@@ -63,7 +72,7 @@ class AsientoService:
             cursor.close()
             conexion.close()
 
-    def crear_reserva_con_asientos(self, usuario_id, vuelo_id, asientos):
+    def crear_reserva_con_asientos(self, usuario_id, vuelo_id, asientos, total_esperado=None):
         conexion = Database.obtener_conexion()
         cursor = conexion.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
@@ -76,7 +85,7 @@ class AsientoService:
                   AND estado = TRUE
                   AND (fecha + hora_salida) >
                       (CURRENT_TIMESTAMP AT TIME ZONE 'America/Guayaquil')
-                FOR SHARE
+                FOR UPDATE
             """, (vuelo_id,))
             if cursor.fetchone() is None:
                 raise ValueError("El vuelo ya finalizó o no se encuentra vigente")
@@ -95,6 +104,7 @@ class AsientoService:
             ))
 
             fila = cursor.fetchone()
+            self._verificar_total(fila["total"], total_esperado)
 
             conexion.commit()
 
@@ -114,7 +124,7 @@ class AsientoService:
             cursor.close()
             conexion.close()
 
-    def actualizar_reserva_con_asientos(self, usuario_id, reserva_id, asientos):
+    def actualizar_reserva_con_asientos(self, usuario_id, reserva_id, asientos, total_esperado=None):
         conexion = Database.obtener_conexion()
         cursor = conexion.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
@@ -141,6 +151,8 @@ class AsientoService:
                 reserva_id,
                 asientos
             ))
+            cursor.execute("SELECT total FROM reservas WHERE id = %s", (reserva_id,))
+            self._verificar_total(cursor.fetchone()["total"], total_esperado)
             cursor.execute("""
                 UPDATE reservas
                 SET modificada = TRUE
